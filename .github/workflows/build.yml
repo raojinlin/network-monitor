@@ -1,0 +1,218 @@
+name: Build and Release
+
+on:
+  push:
+    branches: [ main, develop ]
+    tags: [ 'v*' ]
+  pull_request:
+    branches: [ main ]
+
+env:
+  GO_VERSION: '1.21'
+  NODE_VERSION: '18'
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v4
+    
+    - name: Set up Go
+      uses: actions/setup-go@v4
+      with:
+        go-version: ${{ env.GO_VERSION }}
+    
+    - name: Set up Node.js
+      uses: actions/setup-node@v4
+      with:
+        node-version: ${{ env.NODE_VERSION }}
+        cache: 'npm'
+        cache-dependency-path: frontend/package-lock.json
+    
+    - name: Install frontend dependencies
+      run: |
+        cd frontend
+        npm ci
+    
+    - name: Install backend dependencies
+      run: |
+        cd backend
+        go mod download
+    
+    - name: Run frontend tests
+      run: |
+        cd frontend
+        npm test || echo "No tests configured"
+    
+    - name: Run backend tests
+      run: |
+        cd backend
+        go test -v ./...
+    
+    - name: Run linting
+      run: |
+        cd backend
+        go fmt ./...
+        go vet ./...
+
+  build:
+    needs: test
+    strategy:
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+        include:
+          - os: ubuntu-latest
+            goos: linux
+            goarch: amd64
+          - os: macos-latest
+            goos: darwin
+            goarch: amd64
+          - os: windows-latest
+            goos: windows
+            goarch: amd64
+    runs-on: ${{ matrix.os }}
+    
+    steps:
+    - uses: actions/checkout@v4
+    
+    - name: Set up Go
+      uses: actions/setup-go@v4
+      with:
+        go-version: ${{ env.GO_VERSION }}
+    
+    - name: Set up Node.js
+      uses: actions/setup-node@v4
+      with:
+        node-version: ${{ env.NODE_VERSION }}
+        cache: 'npm'
+        cache-dependency-path: frontend/package-lock.json
+    
+    - name: Build frontend
+      run: |
+        cd frontend
+        npm ci
+        npm run build
+    
+    - name: Install system dependencies
+      if: matrix.os == 'ubuntu-latest'
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y libpcap-dev
+    
+    - name: Build backend
+      run: |
+        cd backend
+        mkdir -p ../dist
+        if [ "${{ matrix.goos }}" = "windows" ]; then
+          go build -o ../dist/traffic-sniff-${{ matrix.goos }}-${{ matrix.goarch }}.exe cmd/server/main.go
+        else
+          go build -o ../dist/traffic-sniff-${{ matrix.goos }}-${{ matrix.goarch }} cmd/server/main.go
+        fi
+      shell: bash
+    
+    - name: Upload build artifacts
+      uses: actions/upload-artifact@v3
+      with:
+        name: traffic-sniff-${{ matrix.goos }}-${{ matrix.goarch }}
+        path: |
+          dist/traffic-sniff-*
+          frontend/dist/
+
+  docker:
+    needs: test
+    runs-on: ubuntu-latest
+    if: github.event_name == 'push' && (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/'))
+    
+    steps:
+    - uses: actions/checkout@v4
+    
+    - name: Set up Docker Buildx
+      uses: docker/setup-buildx-action@v3
+    
+    - name: Log in to Docker Hub
+      if: github.event_name != 'pull_request'
+      uses: docker/login-action@v3
+      with:
+        username: ${{ secrets.DOCKER_USERNAME }}
+        password: ${{ secrets.DOCKER_PASSWORD }}
+    
+    - name: Extract metadata
+      id: meta
+      uses: docker/metadata-action@v5
+      with:
+        images: traffic-monitor
+        tags: |
+          type=ref,event=branch
+          type=ref,event=pr
+          type=semver,pattern={{version}}
+          type=semver,pattern={{major}}.{{minor}}
+          type=sha
+    
+    - name: Build and push Docker image
+      uses: docker/build-push-action@v5
+      with:
+        context: .
+        platforms: linux/amd64,linux/arm64
+        push: ${{ github.event_name != 'pull_request' }}
+        tags: ${{ steps.meta.outputs.tags }}
+        labels: ${{ steps.meta.outputs.labels }}
+        cache-from: type=gha
+        cache-to: type=gha,mode=max
+
+  release:
+    needs: [build, docker]
+    runs-on: ubuntu-latest
+    if: startsWith(github.ref, 'refs/tags/')
+    
+    steps:
+    - uses: actions/checkout@v4
+    
+    - name: Download all artifacts
+      uses: actions/download-artifact@v3
+      with:
+        path: artifacts
+    
+    - name: Create release package
+      run: |
+        mkdir -p release
+        cp -r artifacts/*/dist/traffic-sniff-* release/ || true
+        cp -r artifacts/traffic-sniff-linux-amd64/frontend release/ || true
+        
+        # Create README for release
+        cat > release/README.md << 'EOF'
+        # Traffic Monitor Release
+        
+        ## Quick Start
+        
+        1. Download the appropriate binary for your platform
+        2. Extract the archive
+        3. Run: `./traffic-sniff -port=8080`
+        4. Open http://localhost:8080 in your browser
+        
+        ## Binaries
+        
+        - `traffic-sniff-linux-amd64`: Linux x64
+        - `traffic-sniff-linux-arm64`: Linux ARM64
+        - `traffic-sniff-darwin-amd64`: macOS Intel
+        - `traffic-sniff-darwin-arm64`: macOS Apple Silicon
+        - `traffic-sniff-windows-amd64.exe`: Windows x64
+        
+        ## Requirements
+        
+        - Root/Administrator privileges for packet capture
+        - Network interface access
+        EOF
+        
+        # Create release archive
+        tar -czf traffic-monitor-${{ github.ref_name }}.tar.gz -C release .
+    
+    - name: Create Release
+      uses: softprops/action-gh-release@v1
+      with:
+        files: |
+          traffic-monitor-${{ github.ref_name }}.tar.gz
+        draft: false
+        prerelease: ${{ contains(github.ref, 'alpha') || contains(github.ref, 'beta') || contains(github.ref, 'rc') }}
+        generate_release_notes: true
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

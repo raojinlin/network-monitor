@@ -1,0 +1,73 @@
+version: '3.8'
+
+services:
+  traffic-monitor:
+    build: .
+    image: traffic-monitor:latest
+    container_name: traffic-monitor
+    restart: unless-stopped
+    
+    # Network configuration for packet capture
+    network_mode: host
+    
+    # Privileged mode required for packet capture
+    privileged: true
+    
+    ports:
+      - "8080:8080"
+    
+    environment:
+      - PORT=8080
+      - INTERFACE=eth0  # Change this to your interface
+      - STORAGE=/app/data
+    
+    volumes:
+      # Persist data
+      - ./data:/app/data
+      # Access to network interfaces
+      - /sys/class/net:/sys/class/net:ro
+    
+    command: >
+      ./traffic-sniff 
+      -port=${PORT:-8080} 
+      -interface=${INTERFACE:-} 
+      -storage=${STORAGE:-./data}
+    
+    healthcheck:
+      test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://localhost:8080/"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+    
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.traffic-monitor.rule=Host(`traffic-monitor.local`)"
+      - "traefik.http.services.traffic-monitor.loadbalancer.server.port=8080"
+
+# Optional: Reverse proxy with Traefik
+  # traefik:
+  #   image: traefik:v2.10
+  #   container_name: traefik
+  #   restart: unless-stopped
+  #   ports:
+  #     - "80:80"
+  #     - "443:443"
+  #     - "8080:8080"  # Traefik dashboard
+  #   volumes:
+  #     - /var/run/docker.sock:/var/run/docker.sock:ro
+  #     - ./traefik:/etc/traefik
+  #   command:
+  #     - --api.dashboard=true
+  #     - --providers.docker=true
+  #     - --providers.docker.exposedbydefault=false
+  #     - --entrypoints.web.address=:80
+  #     - --entrypoints.websecure.address=:443
+
+volumes:
+  data:
+    driver: local
+
+networks:
+  default:
+    driver: bridge

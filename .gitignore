@@ -1,0 +1,7 @@
+backend/data
+node_modules/
+.claude
+CLAUDE.md
+PRD.md
+*.gz
+build/
