@@ -1,6 +1,7 @@
 package storage
 
 import (
+	"fmt"
 	"sync"
 	"time"
 
@@ -156,8 +157,8 @@ func (m *MemoryStorage) GetHistoricalData(start, end time.Time, interval time.Du
 }
 
 func connectionKey(conn *models.Connection) string {
-	return conn.SrcIP + ":" + string(conn.SrcPort) + "-" + 
-		   conn.DstIP + ":" + string(conn.DstPort) + "-" + conn.Protocol
+	return conn.SrcIP + ":" + fmt.Sprint(conn.SrcPort) + "-" +
+		conn.DstIP + ":" + fmt.Sprint(conn.DstPort) + "-" + conn.Protocol
 }
 
 // ClearConnections clears all connection data (used when switching interfaces)
